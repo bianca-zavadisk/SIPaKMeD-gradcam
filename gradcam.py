@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
@@ -5,113 +6,264 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+import glob
+import kagglehub
 
 # Import Grad-CAM from the jacobgil library
 from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
-# 1. Load the Trained Model
+plt.rcParams.update({
+    "font.size": 9,
+    "axes.titlesize": 10,
+    "axes.labelsize": 10,
+})
+
+# ==========================================
+# 1. Carregar o Modelo Treinado
+# ==========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-num_classes = 5 # Adjust if your SIPaKMeD subset has a different number
+num_classes = 5 
 model = models.resnet50(weights=None)
 num_features = model.fc.in_features
 model.fc = nn.Linear(num_features, num_classes)
 
-# Load the weights you saved previously
+# Carregue os pesos que você salvou no fine-tuning
 model.load_state_dict(torch.load("sipakmed_resnet50.pth", map_location=device))
 model = model.to(device)
 model.eval()
 
-# 2. Setup Grad-CAM
-# For ResNet, the best layer for Grad-CAM is usually the last convolutional block
+# ==========================================
+# 2. Configurar o Grad-CAM
+# ==========================================
 target_layers = [model.layer4[-1]]
-
 cam = GradCAM(model=model, target_layers=target_layers)
 
-# 3. Load and Prepare Image and Masks
-# REPLACE these with actual paths from your dataset/segmentation model
-image_path = "path/to/sipakmed_image.bmp"
-cell_mask_path = "path/to/cell_mask.bmp"
-nucleus_mask_path = "path/to/nucleus_mask.bmp"
-
-# Load image for the model (requires exact normalization used in training)
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-pil_image = Image.open(image_path).convert('RGB')
-input_tensor = transform(pil_image).unsqueeze(0).to(device)
-
-# Load image for visualization (RGB, float, scaled between 0 and 1)
-rgb_img = cv2.imread(image_path, 1)[:, :, ::-1] # BGR to RGB
-rgb_img = cv2.resize(rgb_img, (224, 224))
-rgb_img = np.float32(rgb_img) / 255
-
-# Load masks (Grayscale, resize to match model input, threshold to binary 0 or 1)
 def load_and_prep_mask(path):
     mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        return np.zeros((224, 224), dtype=np.uint8) # Prevenção de erro
     mask = cv2.resize(mask, (224, 224))
     _, mask = cv2.threshold(mask, 127, 1, cv2.THRESH_BINARY)
     return mask
 
-cell_mask = load_and_prep_mask(cell_mask_path)
-nucleus_mask = load_and_prep_mask(nucleus_mask_path)
+def read_dat_file(dat_path):
+    coords = []
+    with open(dat_path, "r") as f:
+        for line in f:
+            line = line.strip()
 
-# 4. Generate Grad-CAM Heatmap
-# We want to see what parts of the image contribute to the highest scoring class
-# If you want to force it to look at a specific class index, pass e.g., [ClassifierOutputTarget(2)]
-targets = None 
+            if line == "" or line.startswith("#"):
+                continue
 
-# Generate the CAM (returns a numpy array)
-grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
-grayscale_cam = grayscale_cam[0, :] # Take the first image in the batch
+            x, y = line.split(",")
+            coords.append((int(float(x)), int(float(y))))
 
-# Create the visual overlay
-visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+    return coords
 
-# 5. Analyze Correspondence (Overlap Metric)
-# Threshold the CAM to find the "highest attention" areas (e.g., top 30% of activations)
-cam_threshold = 0.7 
-attention_mask = (grayscale_cam >= cam_threshold).astype(np.uint8)
+def generate_mask_from_contours(height, width, nucleus_coords, cytoplasm_coords):
 
-# Calculate what percentage of the model's top attention falls inside the masks
-attention_area = np.sum(attention_mask)
+    nucleus_mask = np.zeros((height, width), dtype=np.uint8)
+    cytoplasm_mask = np.zeros((height, width), dtype=np.uint8)
 
-if attention_area > 0:
-    cell_overlap = np.sum(attention_mask & cell_mask) / attention_area
-    nucleus_overlap = np.sum(attention_mask & nucleus_mask) / attention_area
-else:
-    cell_overlap, nucleus_overlap = 0.0, 0.0
+    cv2.fillPoly(
+        nucleus_mask,
+        [np.array(nucleus_coords, dtype=np.int32)],
+        1,
+    )
 
-print(f"Percentage of high-attention area inside Cell Mask: {cell_overlap * 100:.2f}%")
-print(f"Percentage of high-attention area inside Nucleus Mask: {nucleus_overlap * 100:.2f}%")
+    cv2.fillPoly(
+        cytoplasm_mask,
+        [np.array(cytoplasm_coords, dtype=np.int32)],
+        1,
+    )
 
-# 6. Visualize Results
-fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    cytoplasm_mask = cytoplasm_mask - nucleus_mask
+    cytoplasm_mask[cytoplasm_mask < 0] = 0
 
-axes[0].imshow(rgb_img)
-axes[0].set_title('Original Image')
-axes[0].axis('off')
+    return nucleus_mask, cytoplasm_mask
 
-# Display cell mask (blue) and nucleus (red) combined for visual clarity
-combined_mask = np.zeros_like(rgb_img)
-combined_mask[cell_mask == 1] = [0, 0, 1]  # Blue for cell
-combined_mask[nucleus_mask == 1] = [1, 0, 0]  # Red for nucleus
-axes[1].imshow(combined_mask)
-axes[1].set_title('Ground Truth Masks\n(Blue=Cell, Red=Nucleus)')
-axes[1].axis('off')
+# ==========================================
+# 3. Mapear as Imagens (5ª de cada classe)
+# ==========================================
+BASE_DATASET_DIR = "/home/al.bianca.abreu/.cache/kagglehub/datasets/prahladmehandiratta/cervical-cancer-largest-dataset-sipakmed/versions/1"
+BASE_OUTPUT_DIR = os.path.join(os.getcwd(), "sipakmed_generated_masks")
 
-axes[2].imshow(grayscale_cam, cmap='jet')
-axes[2].set_title('Raw Grad-CAM Heatmap')
-axes[2].axis('off')
+classes = ['im_Koilocytotic', 'im_Superficial-Intermediate', 'im_Dyskeratotic', 'im_Parabasal', 'im_Metaplastic']
 
-axes[3].imshow(visualization)
-axes[3].set_title('Grad-CAM Overlay')
-axes[3].axis('off')
+import os
+import glob
 
-plt.tight_layout()
+# Configurando o Plot com 5 linhas (classes) e 4 colunas (visualizações)
+fig, axes = plt.subplots(
+    5,
+    5,
+    figsize=(17,15),
+    constrained_layout=True
+)
+
+titles = [
+    "Original",
+    "Ground Truth",
+    "Predicted\nSegmentation",
+    "Grad-CAM",
+    "Overlay",
+]
+
+for j, t in enumerate(titles):
+    axes[0, j].set_title(t, fontsize=10)
+
+for i, cls in enumerate(classes):
+    print(f"\n--- Processando Classe: {cls} ---")
+    
+    possible = glob.glob(
+        os.path.join(BASE_DATASET_DIR, cls, "**", "CROPPED"),
+        recursive=True,
+    )
+
+    pasta_imagens = possible[0]
+    
+    # Pega automaticamente todos os nomes e seleciona a 5ª imagem (índice 4)
+    todas_imagens = sorted([f for f in os.listdir(pasta_imagens) if f.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg'))])
+    nome_imagem = todas_imagens[4]
+    print(f"Arquivo selecionado: {nome_imagem}")
+    
+    # Constrói os caminhos
+    image_path = os.path.join(pasta_imagens, nome_imagem)
+
+    base = os.path.splitext(image_path)[0]
+
+    cyt_path = base + "_cyt.dat"
+    nuc_path = base + "_nuc.dat"
+
+    img = Image.open(image_path)
+
+    width, height = img.size
+
+    nucleus_coords = read_dat_file(nuc_path)
+    cytoplasm_coords = read_dat_file(cyt_path)
+
+    gt_nucleus, gt_cell = generate_mask_from_contours(
+        height,
+        width,
+        nucleus_coords,
+        cytoplasm_coords,
+    )
+
+    gt_nucleus = cv2.resize(
+        gt_nucleus,
+        (224,224),
+        interpolation=cv2.INTER_NEAREST
+    )
+
+    gt_cell = cv2.resize(
+        gt_cell,
+        (224,224),
+        interpolation=cv2.INTER_NEAREST
+    )
+
+    cell_mask_path = os.path.join(
+        BASE_OUTPUT_DIR,
+        "cell_masks",
+        cls,
+        nome_imagem,
+    )
+
+    nucleus_mask_path = os.path.join(
+        BASE_OUTPUT_DIR,
+        "nucleus_masks",
+        cls,
+        nome_imagem,
+    )
+
+    # Preparar a imagem para o modelo
+    pil_image = Image.open(image_path).convert('RGB')
+    input_tensor = transform(pil_image).unsqueeze(0).to(device)
+
+    # Preparar a imagem original para visualização
+    rgb_img = cv2.imread(image_path, 1)[:, :, ::-1] # BGR to RGB
+    rgb_img = cv2.resize(rgb_img, (224, 224))
+    rgb_img = np.float32(rgb_img) / 255
+
+    ground_truth = np.zeros_like(rgb_img)
+
+    ground_truth[gt_cell == 1] = [0,0,1]
+    ground_truth[gt_nucleus == 1] = [1,0,0]
+
+    # Carregar as máscaras da célula e do núcleo
+    cell_mask = load_and_prep_mask(cell_mask_path)
+    nucleus_mask = load_and_prep_mask(nucleus_mask_path)
+
+    # Gerar o Grad-CAM Heatmap
+    grayscale_cam = cam(input_tensor=input_tensor, targets=None)
+    grayscale_cam = grayscale_cam[0, :]
+
+    # Criar a sobreposição do Grad-CAM na imagem
+    visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+
+    # Calcular as métricas de Sobreposição (Overlap)
+    cam_threshold = 0.7 
+    attention_mask = (grayscale_cam >= cam_threshold).astype(np.uint8)
+    attention_area = np.sum(attention_mask)
+
+    if attention_area > 0:
+        cell_overlap = np.sum(attention_mask & cell_mask) / attention_area
+        nucleus_overlap = np.sum(attention_mask & nucleus_mask) / attention_area
+    else:
+        cell_overlap, nucleus_overlap = 0.0, 0.0
+
+    print(f"  % de alta atenção na Célula (Azul): {cell_overlap * 100:.2f}%")
+    print(f"  % de alta atenção no Núcleo (Vermelho): {nucleus_overlap * 100:.2f}%")
+
+    # Juntar a máscara da célula e núcleo em uma imagem RGB para visualizar
+    combined_mask = np.zeros_like(rgb_img)
+    combined_mask[cell_mask == 1] = [0, 0, 1]  # Azul = Célula
+    combined_mask[nucleus_mask == 1] = [1, 0, 0]  # Vermelho = Núcleo
+
+    # ==========================================
+    # 4. Adicionar ao Subplot na linha 'i'
+    # ==========================================
+    nome_limpo_classe = cls.replace("im_", "") # Limpa o nome para o plot ficar mais bonito
+    
+    # Row label
+    axes[i,0].imshow(rgb_img)
+    axes[i,0].axis("off")
+    axes[i,0].set_ylabel(
+        nome_limpo_classe,
+        fontsize=10,
+        rotation=90,
+        fontweight="bold",
+        labelpad=15,
+    )
+
+    # Ground truth
+    axes[i,1].imshow(ground_truth)
+    axes[i,1].axis("off")
+
+    # Predicted segmentation
+    axes[i,2].imshow(combined_mask)
+    axes[i,2].axis("off")
+
+    # GradCAM
+    axes[i,3].imshow(grayscale_cam, cmap="jet")
+    axes[i,3].axis("off")
+
+    # Overlay
+    axes[i,4].imshow(visualization)
+    axes[i,4].axis("off")
+    
+os.makedirs("visualizations", exist_ok=True)
+
+save_path = os.path.join("visualizations", "gradcam_resnet50.png")
+
+plt.savefig(save_path, dpi=300, bbox_inches="tight")
+print(f"Figure saved to {save_path}")
+
 plt.show()
