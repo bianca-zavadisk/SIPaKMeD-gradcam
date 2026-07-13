@@ -1,1 +1,4 @@
 env/
+sipakmed_generated_masks/
+__pycache__/
+*.pth

@@ -8,3 +8,5 @@ matplotlib
 IProgress
 scikit-learn
 torchmetrics
+pytoch-gradcam
+grad-cam
