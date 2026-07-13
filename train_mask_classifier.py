@@ -7,6 +7,7 @@ from torchvision import models, transforms
 from torchvision.models import ResNet50_Weights
 from PIL import Image
 from tqdm import tqdm
+import glob
 
 # ==========================================
 # 1. Custom Dataset Adaptado para a Estrutura do Seu Cache
@@ -22,25 +23,43 @@ class SIPaKMeDMaskDataset(Dataset):
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
         
         self.image_paths = [] 
-        self.labels = []
+        self.targets = []
         
         for cls_name in self.classes:
-            cls_dir = os.path.join(images_dir, cls_name, cls_name)
-            if not os.path.isdir(cls_dir): continue
-            
-            for img_name in os.listdir(cls_dir):
-                if img_name.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg')):
-                    self.image_paths.append((cls_name, img_name))
-                    self.labels.append(self.class_to_idx[cls_name])
+
+            cropped_dirs = glob.glob(
+                os.path.join(images_dir, cls_name, "**", "CROPPED"),
+                recursive=True
+            )
+
+            if len(cropped_dirs) == 0:
+                print(f"CROPPED folder not found for {cls_name}")
+                continue
+
+            cls_dir = cropped_dirs[0]
+
+            for img_name in sorted(os.listdir(cls_dir)):
+                if img_name.lower().endswith((".bmp", ".png", ".jpg", ".jpeg")):
+
+                    self.image_paths.append(
+                        (cls_name, cls_dir, img_name)
+                    )
+
+                    self.targets.append(
+                        self.class_to_idx[cls_name]
+                    )
 
     def __len__(self):
         return len(self.image_paths)
         
     def __getitem__(self, idx):
-        cls_name, img_name = self.image_paths[idx]
-        label = self.labels[idx]
+        cls_name, cls_dir, img_name = self.image_paths[idx]
+        label = self.targets[idx]
         
-        img_path = os.path.join(self.images_dir, cls_name, cls_name, img_name)
+        img_path = os.path.join(
+            cls_dir,
+            img_name
+        )
         image = Image.open(img_path).convert("RGB")
         
         cell_path = os.path.join(self.cell_masks_dir, cls_name, img_name)

@@ -7,6 +7,60 @@ from torch.utils.data import DataLoader, random_split
 import kagglehub
 import os
 from tqdm.auto import tqdm # Import tqdm
+from torch.utils.data import Dataset
+from PIL import Image
+import glob
+
+
+class SipakMedCroppedDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.transform = transform
+        self.samples = []
+
+        classes = [
+            "im_Koilocytotic",
+            "im_Superficial-Intermediate",
+            "im_Dyskeratotic",
+            "im_Parabasal",
+            "im_Metaplastic"
+        ]
+
+        self.classes = classes
+
+        self.class_to_idx = {
+            cls: idx
+            for idx, cls in enumerate(self.classes)
+}
+
+        for cls in classes:
+
+            cropped_dir = glob.glob(
+                os.path.join(root_dir, cls, "**", "CROPPED"),
+                recursive=True
+            )[0]
+
+            for img_path in sorted(glob.glob(os.path.join(cropped_dir, "*.bmp"))):
+
+                self.samples.append(
+                    (
+                        img_path,
+                        self.class_to_idx[cls]
+                    )
+                )
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+
+        img_path, label = self.samples[idx]
+
+        image = Image.open(img_path).convert("RGB")
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
 
 # ==========================================
 # 1. Dataset Setup
@@ -21,7 +75,10 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-dataset = datasets.ImageFolder(root=data_dir, transform=transform)
+dataset = SipakMedCroppedDataset(
+    data_dir,
+    transform=transform
+)
 num_classes = len(dataset.classes)
 
 train_size = int(0.8 * len(dataset))

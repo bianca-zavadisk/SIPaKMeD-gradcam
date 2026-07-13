@@ -43,7 +43,18 @@ classes = ['im_Koilocytotic', 'im_Superficial-Intermediate', 'im_Dyskeratotic', 
 
 for cls in classes:
     # Resolve a estrutura duplicada do Kaggle (ex: im_Koilocytotic/im_Koilocytotic)
-    class_images_dir = os.path.join(BASE_DATASET_DIR, cls, cls)
+    import glob
+
+    cropped_dirs = glob.glob(
+        os.path.join(BASE_DATASET_DIR, cls, "**", "CROPPED"),
+        recursive=True
+    )
+
+    if len(cropped_dirs) == 0:
+        print(f"CROPPED folder not found for {cls}")
+        continue
+
+    class_images_dir = cropped_dirs[0]
     
     if not os.path.exists(class_images_dir):
         print(f"Aviso: Caminho não encontrado: {class_images_dir}")
