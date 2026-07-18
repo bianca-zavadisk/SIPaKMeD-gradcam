@@ -1,4 +1,5 @@
 import os
+import kagglehub
 import torch
 import cv2
 import numpy as np
@@ -12,7 +13,7 @@ from UNet_model import UNet
 # 1. CAMINHOS DEFINIDOS MANUALMENTE (SEU AMBIENTE)
 # ==========================================
 # Caminho exato do seu cache que contém as imagens (.bmp)
-BASE_DATASET_DIR = "/home/al.bianca.abreu/.cache/kagglehub/datasets/prahladmehandiratta/cervical-cancer-largest-dataset-sipakmed/versions/1"
+BASE_DATASET_DIR = kagglehub.dataset_download("prahladmehandiratta/cervical-cancer-largest-dataset-sipakmed")
 
 # Onde as máscaras geradas pela UNet serão salvas
 BASE_OUTPUT_DIR = os.path.join(os.getcwd(), "sipakmed_generated_masks")

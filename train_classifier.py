@@ -11,7 +11,6 @@ from torch.utils.data import Dataset
 from PIL import Image
 import glob
 
-
 class SipakMedCroppedDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.transform = transform
