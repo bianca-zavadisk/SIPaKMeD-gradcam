@@ -138,6 +138,31 @@ transforms_dict = {
     ])
 }
 
+# ==========================================
+# Check if masks exist
+# ==========================================
+if not os.path.exists(CELL_MASKS_DIR) or not os.path.exists(NUCLEUS_MASKS_DIR):
+    error_msg = f"""
+    ❌ ERRO: Máscaras não encontradas!
+    
+    O diretório de máscaras não existe:
+      - Cell masks: {CELL_MASKS_DIR}
+      - Nucleus masks: {NUCLEUS_MASKS_DIR}
+    
+    ✅ SOLUÇÃO: Execute o script de geração de máscaras ANTES deste:
+    
+        python3 generate_masks.py
+    
+    Isso irá gerar as máscaras usando o modelo U-Net salvo em 'unet_model.pth'
+    
+    Após gerar as máscaras, execute este script novamente:
+    
+        python3 train_mask_classifier.py
+    """
+    print(error_msg)
+    logger.error(error_msg)
+    raise FileNotFoundError(f"Mask directories not found. Please run 'python3 generate_masks.py' first.")
+
 logger.info("Loading 5-channel dataset with masks...")
 print("Carregando dataset de 5 canais...")
 dataset = SIPaKMeDMaskDataset(IMAGES_DIR, CELL_MASKS_DIR, NUCLEUS_MASKS_DIR, transforms_dict)
