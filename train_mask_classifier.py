@@ -8,6 +8,44 @@ from torchvision.models import ResNet50_Weights
 from PIL import Image
 from tqdm import tqdm
 import glob
+import numpy as np
+import logging
+from datetime import datetime
+
+# ==========================================
+# Configure SEED for Reproducibility
+# ==========================================
+SEED = 42
+
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# ==========================================
+# Configure Logging
+# ==========================================
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_filename = os.path.join(log_dir, f"training_mask_{timestamp}.log")
+
+# Configure logging to both file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+logger.info(f"=== Mask Classifier Training Session Started at {timestamp} ===")
+logger.info(f"SEED: {SEED}")
+logger.info(f"Log file: {log_filename}")
 
 # ==========================================
 # 1. Custom Dataset Adaptado para a Estrutura do Seu Cache
@@ -100,16 +138,31 @@ transforms_dict = {
     ])
 }
 
+logger.info("Loading 5-channel dataset with masks...")
 print("Carregando dataset de 5 canais...")
 dataset = SIPaKMeDMaskDataset(IMAGES_DIR, CELL_MASKS_DIR, NUCLEUS_MASKS_DIR, transforms_dict)
 num_classes = len(dataset.classes)
+logger.info(f"Total samples: {len(dataset)}")
+logger.info(f"Number of classes: {num_classes}")
+logger.info(f"Classes: {dataset.classes}")
 
-train_size = int(0.8 * len(dataset))
-val_size = len(dataset) - train_size
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+# Split dataset into train (70%), validation (15%), test (15%)
+train_size = int(0.70 * len(dataset))
+val_size = int(0.15 * len(dataset))
+test_size = len(dataset) - train_size - val_size
+
+train_dataset, val_dataset, test_dataset = random_split(
+    dataset, 
+    [train_size, val_size, test_size]
+)
+
+logger.info(f"Train set size: {len(train_dataset)}")
+logger.info(f"Validation set size: {len(val_dataset)}")
+logger.info(f"Test set size: {len(test_dataset)}")
 
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=2)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=2)
 
 # ==========================================
 # 3. Modificar ResNet50 para 5 Canais
@@ -134,9 +187,11 @@ num_features = model.fc.in_features
 model.fc = nn.Linear(num_features, num_classes)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info(f"Device: {device}")
 model = model.to(device)
 
 criterion = nn.CrossEntropyLoss()
+logger.info(f"Loss function: CrossEntropyLoss")
 
 # ==========================================
 # 4. FASE 1: Loop de Treinamento (Warmup)
@@ -149,9 +204,12 @@ for name, param in model.named_parameters():
         param.requires_grad = False
 
 optimizer_warmup = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001)
+logger.info(f"Optimizer Warmup: Adam, lr=0.001")
 
 warmup_epochs = 3
-print(f"\n[FASE 1] Iniciando treinamento de warmup (5 épocas) em: {device}...")
+phase1_msg = f"\n[FASE 1] Iniciando treinamento de warmup ({warmup_epochs} épocas) em: {device}..."
+print(phase1_msg)
+logger.info(phase1_msg)
 
 for epoch in range(warmup_epochs):
     model.train()
@@ -174,9 +232,13 @@ for epoch in range(warmup_epochs):
         
         progress_bar.set_postfix(batch_loss=f"{loss.item():.4f}", running_acc=f"{(correct/total):.4f}")
         
-    print(f"-> Resumo Warmup Ep {epoch+1} | Loss: {(running_loss/len(train_dataset)):.4f} | Acc: {(correct/total):.4f}\n")
+    warmup_msg = f"-> Resumo Warmup Ep {epoch+1} | Loss: {(running_loss/len(train_dataset)):.4f} | Acc: {(correct/total):.4f}"
+    print(warmup_msg + "\n")
+    logger.info(warmup_msg)
 
-print("Warmup concluído com sucesso!")
+warmup_complete = "Warmup concluído com sucesso!"
+print(warmup_complete)
+logger.info(warmup_complete)
 
 # ==========================================
 # 5. FASE 2: Loop de Treinamento (Fine-Tuning Global)
@@ -191,6 +253,7 @@ for param in model.parameters():
 
 # 2. DEFINIR UMA TAXA DE APRENDIZADO MUITO BAIXA (1e-5) para ajustes cirúrgicos
 optimizer_finetune = optim.Adam(model.parameters(), lr=1e-5)
+logger.info(f"Optimizer Fine-tuning: Adam, lr=1e-5")
 
 fine_tune_epochs = 5
 best_val_acc = 0.0
@@ -238,15 +301,55 @@ for epoch in range(fine_tune_epochs):
     epoch_val_loss = val_loss / len(val_dataset)
     epoch_val_acc = val_correct / val_total
     
-    print(f"-> FIM DA ÉPOCA {epoch+1}/{fine_tune_epochs}")
-    print(f"   [TREINO] Loss: {epoch_train_loss:.4f} | Acurácia: {epoch_train_acc:.4f}")
-    print(f"   [VALIDAÇÃO] Loss: {epoch_val_loss:.4f} | Acurácia: {epoch_val_acc:.4f}")
+    epoch_summary = f"-> FIM DA ÉPOCA {epoch+1}/{fine_tune_epochs}"
+    epoch_train_info = f"   [TREINO] Loss: {epoch_train_loss:.4f} | Acurácia: {epoch_train_acc:.4f}"
+    epoch_val_info = f"   [VALIDAÇÃO] Loss: {epoch_val_loss:.4f} | Acurácia: {epoch_val_acc:.4f}"
+    
+    print(epoch_summary)
+    print(epoch_train_info)
+    print(epoch_val_info)
+    logger.info(epoch_summary)
+    logger.info(epoch_train_info)
+    logger.info(epoch_val_info)
     
     # Salva os pesos se a acurácia de validação bater o recorde anterior
     if epoch_val_acc > best_val_acc:
         best_val_acc = epoch_val_acc
         torch.save(model.state_dict(), "sipakmed_resnet50_5channels_best.pth")
-        print("   ⭐ Melhoria detectada! Pesos salvos em 'sipakmed_resnet50_5channels_best.pth'")
+        best_msg = "   ⭐ Melhoria detectada! Pesos salvos em 'sipakmed_resnet50_5channels_best.pth'"
+        print(best_msg)
+        logger.info(best_msg)
     print("-" * 50 + "\n")
 
-print(f"Treinamento Completo! Melhor Acurácia de Validação alcançada: {best_val_acc:.4f}")
+training_complete = f"Treinamento Completo! Melhor Acurácia de Validação alcançada: {best_val_acc:.4f}"
+print(training_complete)
+logger.info(training_complete)
+
+# ==========================================
+# Evaluate on Test Set
+# ==========================================
+logger.info("\n--- Evaluating on Test Set (5-Channel Model) ---")
+print("\n--- Evaluating on Test Set (5-Channel Model) ---")
+
+model.eval()
+test_loss = 0.0
+test_correct = 0
+test_total = 0
+
+with torch.no_grad():
+    for inputs, labels in test_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        test_loss += loss.item() * inputs.size(0)
+        _, predicted = torch.max(outputs, 1)
+        test_total += labels.size(0)
+        test_correct += (predicted == labels).sum().item()
+
+test_loss = test_loss / len(test_dataset)
+test_acc = test_correct / test_total
+test_log_msg = f"Test Set Results | Loss: {test_loss:.4f} | Accuracy: {test_acc:.4f}"
+print(test_log_msg)
+logger.info(test_log_msg)
+
+logger.info(f"=== Training Session Completed ===")

@@ -1,3 +1,20 @@
 env/
 sipakmed_generated_masks/
 *.pth
+
+# Logs directory
+logs/
+*.log
+
+# Cache
+__pycache__/
+*.pyc
+.cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+temp/
